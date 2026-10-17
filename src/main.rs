@@ -33,7 +33,7 @@ fn execute(src: &[u8], input: &mut impl Read, out: &mut impl Write) -> io::Resul
             continue;
         }
 
-        if b"><+-".contains(&command) {
+        if b"><+-.".contains(&command) {
             if let Some(last) = code.last_mut() {
                 if last.command == command && last.offset + last.argument == offset {
                     last.argument += 1;
@@ -104,7 +104,21 @@ fn execute(src: &[u8], input: &mut impl Read, out: &mut impl Write) -> io::Resul
             }
             b'+' => tape[ptr] = tape[ptr].wrapping_add(instruction.argument as u8),
             b'-' => tape[ptr] = tape[ptr].wrapping_sub(instruction.argument as u8),
-            b'.' => out.write_all(&tape[ptr..ptr + 1])?,
+            b'.' => {
+                if instruction.argument == 1 {
+                    out.write_all(&tape[ptr..ptr + 1])?;
+                } else {
+                    let bytes = [tape[ptr]; 1024];
+                    let mut remaining = instruction.argument;
+
+                    while remaining > 0 {
+                        let count = remaining.min(bytes.len());
+
+                        out.write_all(&bytes[..count])?;
+                        remaining -= count;
+                    }
+                }
+            }
             b',' => {
                 out.flush()?;
                 match input.read_exact(&mut tape[ptr..ptr + 1]) {
