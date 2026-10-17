@@ -59,6 +59,17 @@ fn execute(src: &[u8], input: &mut impl Read, out: &mut impl Write) -> io::Resul
                         code.truncate(opening + 1);
                         continue;
                     }
+                    if b"><".contains(&body.command) {
+                        let scan = Instruction {
+                            command: if body.command == b'>' { b'R' } else { b'L' },
+                            argument: body.argument,
+                            offset: body.offset,
+                        };
+
+                        code[opening] = scan;
+                        code.truncate(opening + 1);
+                        continue;
+                    }
                 }
                 code[opening].argument = code.len() + 1;
                 opening + 1
@@ -101,6 +112,32 @@ fn execute(src: &[u8], input: &mut impl Read, out: &mut impl Write) -> io::Resul
                 ptr = ptr
                     .checked_sub(instruction.argument)
                     .ok_or_else(|| source_error(src, instruction.offset + ptr, "pointer before start of tape"))?;
+            }
+            b'R' => {
+                let stride = instruction.argument;
+
+                if let Some(steps) = tape[ptr..].iter().step_by(stride).position(|&cell| cell == 0) {
+                    ptr += steps * stride;
+                } else {
+                    return Err(source_error(
+                        src,
+                        instruction.offset + (tape.len() - ptr - 1),
+                        "pointer past end of tape",
+                    ));
+                }
+            }
+            b'L' => {
+                let stride = instruction.argument;
+
+                if let Some(steps) = tape[..=ptr].iter().rev().step_by(stride).position(|&cell| cell == 0) {
+                    ptr -= steps * stride;
+                } else {
+                    return Err(source_error(
+                        src,
+                        instruction.offset + ptr,
+                        "pointer before start of tape",
+                    ));
+                }
             }
             b'+' => tape[ptr] = tape[ptr].wrapping_add(instruction.argument as u8),
             b'-' => tape[ptr] = tape[ptr].wrapping_sub(instruction.argument as u8),
