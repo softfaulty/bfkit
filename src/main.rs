@@ -13,6 +13,12 @@ struct Instruction {
     offset: usize,
 }
 
+struct Transfer {
+    distance: usize,
+    factor: u8,
+    left: bool,
+}
+
 fn source_error(src: &[u8], offset: usize, msg: &str) -> io::Error {
     let prefix = &src[..offset];
     let line = prefix.iter().filter(|&&byte| byte == b'\n').count() + 1;
@@ -27,6 +33,7 @@ fn source_error(src: &[u8], offset: usize, msg: &str) -> io::Error {
 fn execute(src: &[u8], input: &mut impl Read, out: &mut impl Write) -> io::Result<()> {
     let mut code: Vec<Instruction> = Vec::new();
     let mut openings = Vec::new();
+    let mut transfers = Vec::new();
 
     for (offset, &command) in src.iter().enumerate() {
         if !b"><+-.,[]".contains(&command) {
@@ -67,6 +74,34 @@ fn execute(src: &[u8], input: &mut impl Read, out: &mut impl Write) -> io::Resul
                         };
 
                         code[opening] = scan;
+                        code.truncate(opening + 1);
+                        continue;
+                    }
+                }
+                if let [counter, outward, target, inward] = &code[opening + 1..] {
+                    if counter.command == b'-'
+                        && counter.argument == 1
+                        && matches!((outward.command, inward.command), (b'>', b'<') | (b'<', b'>'))
+                        && outward.argument == inward.argument
+                        && b"+-".contains(&target.command)
+                    {
+                        let amount = target.argument as u8;
+                        let transfer = Transfer {
+                            distance: outward.argument,
+                            factor: if target.command == b'+' {
+                                amount
+                            } else {
+                                0u8.wrapping_sub(amount)
+                            },
+                            left: outward.command == b'<',
+                        };
+                        let offset = outward.offset;
+                        code[opening] = Instruction {
+                            command: b'T',
+                            argument: transfers.len(),
+                            offset,
+                        };
+                        transfers.push(transfer);
                         code.truncate(opening + 1);
                         continue;
                     }
@@ -121,7 +156,7 @@ fn execute(src: &[u8], input: &mut impl Read, out: &mut impl Write) -> io::Resul
                 } else {
                     return Err(source_error(
                         src,
-                        instruction.offset + (tape.len() - ptr - 1),
+                        instruction.offset + (tape.len() - ptr - 1) % stride,
                         "pointer past end of tape",
                     ));
                 }
@@ -134,10 +169,30 @@ fn execute(src: &[u8], input: &mut impl Read, out: &mut impl Write) -> io::Resul
                 } else {
                     return Err(source_error(
                         src,
-                        instruction.offset + ptr,
+                        instruction.offset + ptr % stride,
                         "pointer before start of tape",
                     ));
                 }
+            }
+            b'T' if tape[ptr] != 0 => {
+                let transfer = &transfers[instruction.argument];
+                let target = if transfer.left {
+                    ptr.checked_sub(transfer.distance)
+                        .ok_or_else(|| source_error(src, instruction.offset + ptr, "pointer before start of tape"))?
+                } else {
+                    ptr.checked_add(transfer.distance)
+                        .filter(|&target| target < tape.len())
+                        .ok_or_else(|| {
+                            source_error(
+                                src,
+                                instruction.offset + tape.len() - ptr - 1,
+                                "pointer past end of tape",
+                            )
+                        })?
+                };
+                let amount = tape[ptr].wrapping_mul(transfer.factor);
+                tape[target] = tape[target].wrapping_add(amount);
+                tape[ptr] = 0;
             }
             b'+' => tape[ptr] = tape[ptr].wrapping_add(instruction.argument as u8),
             b'-' => tape[ptr] = tape[ptr].wrapping_sub(instruction.argument as u8),
