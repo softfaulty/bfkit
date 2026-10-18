@@ -30,6 +30,24 @@ fn source_error(src: &[u8], offset: usize, msg: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, format!("{line}:{column}: {msg}"))
 }
 
+fn pointer_error(src: &[u8], offset: usize, step: usize) -> io::Error {
+    let command = src[offset];
+    // a compressed move can span ignored bytes so we need to find the actual cause
+    let (index, _) = src[offset..]
+        .iter()
+        .enumerate()
+        .filter(|&(_, &byte)| byte == command)
+        .nth(step)
+        .expect("pointer error outside compressed move");
+    let msg = if command == b'<' {
+        "pointer before start of tape"
+    } else {
+        "pointer past end of tape"
+    };
+
+    source_error(src, offset + index, msg)
+}
+
 fn execute(src: &[u8], input: &mut impl Read, out: &mut impl Write) -> io::Result<()> {
     let mut code: Vec<Instruction> = Vec::new();
     let mut openings = Vec::new();
@@ -42,7 +60,7 @@ fn execute(src: &[u8], input: &mut impl Read, out: &mut impl Write) -> io::Resul
 
         if b"><+-.".contains(&command) {
             if let Some(last) = code.last_mut() {
-                if last.command == command && last.offset + last.argument == offset {
+                if last.command == command {
                     last.argument += 1;
                     continue;
                 }
@@ -135,18 +153,12 @@ fn execute(src: &[u8], input: &mut impl Read, out: &mut impl Write) -> io::Resul
                 ptr = ptr
                     .checked_add(instruction.argument)
                     .filter(|&target| target < tape.len())
-                    .ok_or_else(|| {
-                        source_error(
-                            src,
-                            instruction.offset + tape.len() - ptr - 1,
-                            "pointer past end of tape",
-                        )
-                    })?;
+                    .ok_or_else(|| pointer_error(src, instruction.offset, tape.len() - ptr - 1))?;
             }
             b'<' => {
                 ptr = ptr
                     .checked_sub(instruction.argument)
-                    .ok_or_else(|| source_error(src, instruction.offset + ptr, "pointer before start of tape"))?;
+                    .ok_or_else(|| pointer_error(src, instruction.offset, ptr))?;
             }
             b'R' => {
                 let stride = instruction.argument;
@@ -154,11 +166,7 @@ fn execute(src: &[u8], input: &mut impl Read, out: &mut impl Write) -> io::Resul
                 if let Some(steps) = tape[ptr..].iter().step_by(stride).position(|&cell| cell == 0) {
                     ptr += steps * stride;
                 } else {
-                    return Err(source_error(
-                        src,
-                        instruction.offset + (tape.len() - ptr - 1) % stride,
-                        "pointer past end of tape",
-                    ));
+                    return Err(pointer_error(src, instruction.offset, (tape.len() - ptr - 1) % stride));
                 }
             }
             b'L' => {
@@ -167,28 +175,18 @@ fn execute(src: &[u8], input: &mut impl Read, out: &mut impl Write) -> io::Resul
                 if let Some(steps) = tape[..=ptr].iter().rev().step_by(stride).position(|&cell| cell == 0) {
                     ptr -= steps * stride;
                 } else {
-                    return Err(source_error(
-                        src,
-                        instruction.offset + ptr % stride,
-                        "pointer before start of tape",
-                    ));
+                    return Err(pointer_error(src, instruction.offset, ptr % stride));
                 }
             }
             b'T' if tape[ptr] != 0 => {
                 let transfer = &transfers[instruction.argument];
                 let target = if transfer.left {
                     ptr.checked_sub(transfer.distance)
-                        .ok_or_else(|| source_error(src, instruction.offset + ptr, "pointer before start of tape"))?
+                        .ok_or_else(|| pointer_error(src, instruction.offset, ptr))?
                 } else {
                     ptr.checked_add(transfer.distance)
                         .filter(|&target| target < tape.len())
-                        .ok_or_else(|| {
-                            source_error(
-                                src,
-                                instruction.offset + tape.len() - ptr - 1,
-                                "pointer past end of tape",
-                            )
-                        })?
+                        .ok_or_else(|| pointer_error(src, instruction.offset, tape.len() - ptr - 1))?
                 };
                 let amount = tape[ptr].wrapping_mul(transfer.factor);
                 tape[target] = tape[target].wrapping_add(amount);
